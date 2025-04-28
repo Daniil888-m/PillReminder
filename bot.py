@@ -5,8 +5,16 @@ import datetime
 import pytz
 import asyncio
 import os
+from telegram.error import 
 
 TOKEN = "7392929368:AAEiMeWKDSQ8dYUBqr8ekYy4J1ilagtYuQo"
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if isinstance(context.error, Conflict):
+        print("⚠️ Обнаружен конфликт: уже запущен другой экземпляр бота")
+    else:
+        print(f"⚠️ Ошибка: {context.error}")
+
 
 def init_db():
     conn = sqlite3.connect('pills.db')
@@ -158,7 +166,7 @@ def main():
         print("База данных успешно инициализирована")
         
         app = Application.builder().token(TOKEN).build()
-        
+        app.add_error_handler(error_handler) 
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("timezone", set_timezone))
         app.add_handler(CommandHandler("add", add_reminder))
