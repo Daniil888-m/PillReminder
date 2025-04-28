@@ -1,12 +1,13 @@
-from telegram.ext import Application, CommandHandler
+from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update
 import sqlite3
 import datetime
+import pytz
 import asyncio
 import os
 
 TOKEN = "7392929368:AAEiMeWKDSQ8dYUBqr8ekYy4J1ilagtYuQo"
 
-# --- Функции для работы с БД ---
 def init_db():
     conn = sqlite3.connect('pills.db')
     cursor = conn.cursor()
@@ -15,17 +16,18 @@ def init_db():
             chat_id INTEGER,
             drug_name TEXT,
             time TEXT,
+            timezone TEXT DEFAULT 'UTC',
             PRIMARY KEY (chat_id, drug_name)
         )
     ''')
     conn.commit()
     conn.close()
 
-def add_to_db(chat_id, drug_name, time_str):
+def add_to_db(chat_id, drug_name, time_str, timezone='UTC'):
     conn = sqlite3.connect('pills.db')
     cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO reminders VALUES (?, ?, ?)", 
-                 (chat_id, drug_name, time_str))
+    cursor.execute("INSERT OR REPLACE INTO reminders VALUES (?, ?, ?, ?)", 
+                 (chat_id, drug_name, time_str, timezone))
     conn.commit()
     conn.close()
 
@@ -40,7 +42,7 @@ def del_from_db(chat_id, drug_name):
 def get_reminders(chat_id):
     conn = sqlite3.connect('pills.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT drug_name, time FROM reminders WHERE chat_id=?", 
+    cursor.execute("SELECT drug_name, time, timezone FROM reminders WHERE chat_id=?", 
                  (chat_id,))
     result = cursor.fetchall()
     conn.close()
@@ -49,21 +51,45 @@ def get_reminders(chat_id):
 def get_all_reminders():
     conn = sqlite3.connect('pills.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT chat_id, drug_name, time FROM reminders")
+    cursor.execute("SELECT chat_id, drug_name, time, timezone FROM reminders")
     result = cursor.fetchall()
     conn.close()
     return result
 
-# --- Обработчики команд ---
-async def start(update, context):
+def update_timezone(chat_id, timezone):
+    conn = sqlite3.connect('pills.db')
+    cursor = conn.cursor()
+    cursor.execute("UPDATE reminders SET timezone=? WHERE chat_id=?", 
+                 (timezone, chat_id))
+    conn.commit()
+    conn.close()
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "💊 **Бот-напоминание о лекарствах**\n\n"
+        "Установите ваш часовой пояс: `/timezone Europe/Moscow`\n"
         "Добавить: `/add Миртазапин 22:00`\n"
         "Удалить: `/del Миртазапин`\n"
-        "Список: `/list`"
+        "Список: `/list`\n\n"
+        "Список доступных таймзон: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones"
     )
 
-async def add_reminder(update, context):
+async def set_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+    try:
+        timezone = context.args[0]
+        
+        if timezone not in pytz.all_timezones:
+            await update.message.reply_text("⛔ Неверная таймзона. Пример: `/timezone Europe/Moscow`")
+            return
+            
+        update_timezone(chat_id, timezone)
+        await update.message.reply_text(f"✅ Часовой пояс установлен: {timezone}")
+        
+    except IndexError:
+        await update.message.reply_text("⛔ Используйте: `/timezone Europe/Moscow`")
+
+async def add_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     try:
         drug_name = context.args[0]
@@ -75,13 +101,18 @@ async def add_reminder(update, context):
             await update.message.reply_text("⛔ Формат времени: `22:00`")
             return
 
-        add_to_db(chat_id, drug_name, drug_time)
-        await update.message.reply_text(f"✅ Добавлено: {drug_name} в {drug_time}")
+        timezone = 'UTC'
+        reminders = get_reminders(chat_id)
+        if reminders and reminders[0][2]:  # Если уже есть записи с таймзоной
+            timezone = reminders[0][2]
+            
+        add_to_db(chat_id, drug_name, drug_time, timezone)
+        await update.message.reply_text(f"✅ Добавлено: {drug_name} в {drug_time} (по времени {timezone})")
 
     except IndexError:
         await update.message.reply_text("⛔ Используйте: `/add Лекарство 22:00`")
 
-async def del_reminder(update, context):
+async def del_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     try:
         drug_name = context.args[0]
@@ -90,30 +121,35 @@ async def del_reminder(update, context):
     except IndexError:
         await update.message.reply_text("⛔ Используйте: `/del Лекарство`")
 
-async def list_reminders(update, context):
+async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     reminders = get_reminders(chat_id)
     
     if reminders:
         message = "📋 Ваши напоминания:\n"
-        for drug, time_str in reminders:
-            message += f"- {drug} в {time_str}\n"
+        for drug, time_str, timezone in reminders:
+            message += f"- {drug} в {time_str} (по времени {timezone})\n"
     else:
         message = "ℹ️ Нет активных напоминаний"
     
     await update.message.reply_text(message)
 
-async def check_reminders(context):
+async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
     reminders = get_all_reminders()
-    now = datetime.datetime.now().strftime("%H:%M")
     
-    for chat_id, drug_name, time_str in reminders:
-        if now == time_str:
-            await context.bot.send_message(chat_id, text=f"🔔 Пора принять {drug_name}!")
+    for chat_id, drug_name, time_str, timezone in reminders:
+        try:
+            # Получаем текущее время в указанной таймзоне
+            tz = pytz.timezone(timezone)
+            now = datetime.datetime.now(tz).strftime("%H:%M")
+            
+            if now == time_str:
+                await context.bot.send_message(chat_id, text=f"🔔 Пора принять {drug_name}!")
+        except Exception as e:
+            print(f"Ошибка при проверке напоминания: {e}")
 
 def main():
     try:
-        # Удаляем старую БД
         if os.path.exists('pills.db'):
             os.remove('pills.db')
             print("Старая БД удалена")
@@ -121,11 +157,10 @@ def main():
         init_db()
         print("База данных успешно инициализирована")
         
-        # Создаем Application с включенным JobQueue
         app = Application.builder().token(TOKEN).build()
         
-        # Добавляем обработчики команд
         app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("timezone", set_timezone))
         app.add_handler(CommandHandler("add", add_reminder))
         app.add_handler(CommandHandler("del", del_reminder))
         app.add_handler(CommandHandler("list", list_reminders))
@@ -143,8 +178,10 @@ def main():
 if __name__ == '__main__':
     # Проверяем установку зависимостей
     try:
-        import telegram.ext
+        from telegram.ext import Application, CommandHandler, ContextTypes
+        from telegram import Update
+        import pytz
         main()
     except ImportError:
         print("Ошибка: Не установлены необходимые библиотеки.")
-        print("Установите их командой: pip install python-telegram-bot==20.3")
+        print("Установите их командой: pip install python-telegram-bot==20.3 pytz")
