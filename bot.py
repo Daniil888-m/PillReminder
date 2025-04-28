@@ -5,9 +5,10 @@ import datetime
 import pytz
 import asyncio
 import os
-from telegram.error import 
+from telegram.error import Conflict
 
 TOKEN = "7392929368:AAEiMeWKDSQ8dYUBqr8ekYy4J1ilagtYuQo"
+DEFAULT_TIMEZONE = "Europe/Moscow"
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     if isinstance(context.error, Conflict):
@@ -17,21 +18,27 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 def init_db():
-    conn = sqlite3.connect('pills.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS reminders (
+    conn = None
+    try:
+        conn = sqlite3.connect('pills.db')
+        cursor = conn.cursor()
+        
+        # Простой и надежный запрос в одну строку без сложного форматирования
+        cursor.execute("""CREATE TABLE IF NOT EXISTS reminders (
             chat_id INTEGER,
             drug_name TEXT,
             time TEXT,
-            timezone TEXT DEFAULT 'UTC',
-            PRIMARY KEY (chat_id, drug_name)
-        )
-    ''')
-    conn.commit()
-    conn.close()
+            timezone TEXT DEFAULT 'Europe/Moscow',
+            PRIMARY KEY (chat_id, drug_name))""")
+        
+        conn.commit()
+    except Exception as e:
+        print(f"Ошибка при создании БД: {e}")
+    finally:
+        if conn:
+            conn.close()
 
-def add_to_db(chat_id, drug_name, time_str, timezone='UTC'):
+def add_to_db(chat_id, drug_name, time_str, timezone=DEFAULT_TIMEZONE):
     conn = sqlite3.connect('pills.db')
     cursor = conn.cursor()
     cursor.execute("INSERT OR REPLACE INTO reminders VALUES (?, ?, ?, ?)", 
@@ -74,12 +81,13 @@ def update_timezone(chat_id, timezone):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "💊 **Бот-напоминание о лекарствах**\n\n"
-        "Установите ваш часовой пояс: `/timezone Europe/Moscow`\n"
+        f"💊 **Бот-напоминание о лекарствах**\n\n"
+        f"Часовой пояс по умолчанию: {DEFAULT_TIMEZONE}\n"
+        "Изменить: `/timezone Europe/Moscow`\n"
         "Добавить: `/add Миртазапин 22:00`\n"
         "Удалить: `/del Миртазапин`\n"
         "Список: `/list`\n\n"
-        "Список доступных таймзон: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones"
+        "Список таймзон: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones"
     )
 
 async def set_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -147,12 +155,16 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
     
     for chat_id, drug_name, time_str, timezone in reminders:
         try:
-            # Получаем текущее время в указанной таймзоне
-            tz = pytz.timezone(timezone)
+            # Если timezone не указана, используем московское время
+            tz = pytz.timezone(timezone or DEFAULT_TIMEZONE)
             now = datetime.datetime.now(tz).strftime("%H:%M")
             
             if now == time_str:
-                await context.bot.send_message(chat_id, text=f"🔔 Пора принять {drug_name}!")
+                await context.bot.send_message(
+                    chat_id, 
+                    text=f"🔔 Пора принять {drug_name}!\n"
+                         f"⏰ Текущее время: {now} ({timezone})"
+                )
         except Exception as e:
             print(f"Ошибка при проверке напоминания: {e}")
 
@@ -184,7 +196,6 @@ def main():
         print(f"Ошибка при запуске: {str(e)}")
 
 if __name__ == '__main__':
-    # Проверяем установку зависимостей
     try:
         from telegram.ext import Application, CommandHandler, ContextTypes
         from telegram import Update
